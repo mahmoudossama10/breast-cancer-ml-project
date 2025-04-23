@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('TkAgg')  # Switch to an interactive backend
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -12,174 +12,420 @@ from sklearn.svm import SVC
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, 
                              f1_score, roc_auc_score, confusion_matrix)
 from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE
+from sklearn.ensemble import StackingClassifier, GradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_curve, auc
+from sklearn.ensemble import VotingClassifier
+
+
 
 # Set random seed for reproducibility
 np.random.seed(42)
 
-# Step 1: Data Loading and Initial Inspection
+# ======================
+# STEP 1: Data Loading
+# ======================
+print("=== STEP 1: Data Loading ===")
 df = pd.read_csv('data.csv')
+print(f"Initial dataset shape: {df.shape}")
+print("Columns:", df.columns.tolist())
 
-# Step 2: Data Cleaning and Preprocessing
-# Drop unnecessary column
+# Class distribution plot
+plt.figure(figsize=(8,6))
+sns.countplot(x='diagnosis', data=df)
+plt.title('Initial Class Distribution (M=1, B=0)')
+plt.show()
+
+# ======================
+# STEP 2: Data Cleaning
+# ======================
+print("\n=== STEP 2: Data Cleaning ===")
+
+# Drop ID column
 df = df.drop(columns=['id'])
+print(f"Dropped 'id' column. New shape: {df.shape}")
 
-# Encode target variable
+# Convert diagnosis to binary
 df['diagnosis'] = df['diagnosis'].map({'M': 1, 'B': 0})
+print("\nTarget variable distribution:")
+print(df['diagnosis'].value_counts())
 
-# Check for missing values and duplicates
-print("Missing values:\n", df.isnull().sum())
-print("\nNumber of duplicates:", df.duplicated().sum())
+# Check for duplicates
+duplicates = df.duplicated().sum()
+print(f"\nNumber of duplicates: {duplicates}")
+if duplicates > 0:
+    df = df.drop_duplicates()
+    print(f"Removed {duplicates} duplicates. New shape: {df.shape}")
 
-# Split features and target
-X = df.drop(columns=['diagnosis'])
-y = df['diagnosis']
+# ===================================
+# STEP 3: Correlation-based Filtering
+# ===================================
+print("\n=== STEP 3: Correlation-based Feature Filtering ===")
+threshold = 0.95
 
-# Step 3: Data Splitting
-# Split into train+validation and test
+# Calculate initial correlations and variances
+corr_matrix = df.drop('diagnosis', axis=1).corr().abs()
+variances = df.drop('diagnosis', axis=1).var()
+
+# Pre-removal correlation visualization
+correlated_pairs = []
+for i in range(len(corr_matrix.columns)):
+    for j in range(i+1, len(corr_matrix.columns)):
+        if corr_matrix.iloc[i, j] > threshold:
+            pair = (corr_matrix.columns[i], corr_matrix.columns[j], corr_matrix.iloc[i, j])
+            correlated_pairs.append(pair)
+
+correlated_pairs.sort(key=lambda x: x[2], reverse=True)
+
+plt.figure(figsize=(10, 6))
+if correlated_pairs:
+    labels = [f"{pair[0]} - {pair[1]}" for pair in correlated_pairs]
+    values = [pair[2] for pair in correlated_pairs]
+    
+    plt.barh(range(len(correlated_pairs)), values, align='center', color='darkred')
+    plt.yticks(range(len(correlated_pairs)), labels)
+    plt.xlabel('Correlation Coefficient')
+    plt.title(f'Pre-Removal Correlated Pairs (>{threshold})')
+    plt.gca().invert_yaxis()
+    plt.xlim(0.9, 1.0)
+    plt.grid(axis='x', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+else:
+    print(f"No feature pairs with correlation > {threshold} found")
+
+# Remove features with lower variance in correlated pairs
+high_corr = set()
+for i in range(len(corr_matrix.columns)):
+    for j in range(i+1, len(corr_matrix.columns)):
+        if corr_matrix.iloc[i, j] > threshold:
+            feature1 = corr_matrix.columns[i]
+            feature2 = corr_matrix.columns[j]
+            
+            # Compare variances
+            if variances[feature1] < variances[feature2]:
+                remove_feature = feature1
+            else:
+                remove_feature = feature2
+                
+            high_corr.add(remove_feature)
+
+print(f"\nRemoving {len(high_corr)} features with lower variance:")
+print(high_corr)
+
+df_filtered = df.drop(columns=high_corr)
+print(f"\nRemaining features: {len(df_filtered.columns)}")
+
+# Post-removal correlation check
+post_corr = df_filtered.drop('diagnosis', axis=1).corr().abs()
+remaining_pairs = []
+for i in range(len(post_corr.columns)):
+    for j in range(i+1, len(post_corr.columns)):
+        if post_corr.iloc[i, j] > threshold:
+            pair = (post_corr.columns[i], post_corr.columns[j], post_corr.iloc[i, j])
+            remaining_pairs.append(pair)
+
+plt.figure(figsize=(10, 6))
+if remaining_pairs:
+    labels = [f"{pair[0]} - {pair[1]}" for pair in remaining_pairs]
+    values = [pair[2] for pair in remaining_pairs]
+    
+    plt.barh(range(len(remaining_pairs)), values, align='center', color='darkblue')
+    plt.yticks(range(len(remaining_pairs)), labels)
+    plt.xlabel('Correlation Coefficient')
+    plt.title(f'Post-Removal Correlated Pairs (>{threshold})')
+    plt.gca().invert_yaxis()
+    plt.xlim(0.9, 1.0)
+    plt.grid(axis='x', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+else:
+    print(f"No remaining correlations > {threshold} after removal")
+
+# ============================
+# STEP 4: Data Visualization
+# ============================
+print("\n=== STEP 4: Data Visualization ===")
+
+plt.figure(figsize=(12,6))
+df_filtered.drop('diagnosis', axis=1).boxplot()
+plt.xticks(rotation=90)
+plt.title('Feature Distributions After Filtering')
+plt.show()
+
+plt.figure(figsize=(12,10))
+sns.heatmap(df_filtered.drop('diagnosis', axis=1).corr(), 
+            annot=False, cmap='coolwarm', vmin=-1, vmax=1)
+plt.title('Filtered Feature Correlation Matrix')
+plt.show()
+
+# ======================
+# STEP 5: Data Splitting
+# ======================
+print("\n=== STEP 5: Data Splitting ===")
+
+X = df_filtered.drop(columns=['diagnosis'])
+y = df_filtered['diagnosis']
+
 X_train_val, X_test, y_train_val, y_test = train_test_split(
     X, y, test_size=0.2, stratify=y, random_state=42)
 
-# Split train_val into train and validation
 X_train, X_val, y_train, y_val = train_test_split(
     X_train_val, y_train_val, test_size=0.25, stratify=y_train_val, random_state=42)
 
-# Step 4: Feature Scaling (for initial exploration)
+print(f"\nSplits:\nTrain: {X_train.shape}\nVal: {X_val.shape}\nTest: {X_test.shape}")
+
+# ========================
+# STEP 6: Preprocessing
+# ========================
+print("\n=== STEP 6: Preprocessing ===")
+
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_val_scaled = scaler.transform(X_val)
 X_test_scaled = scaler.transform(X_test)
 
-# Step 5: Feature Engineering (PCA)
-pca = PCA(n_components=0.95)  # Keep 95% variance
+pca = PCA(n_components=0.80)
 X_train_pca = pca.fit_transform(X_train_scaled)
 X_val_pca = pca.transform(X_val_scaled)
 X_test_pca = pca.transform(X_test_scaled)
 
-print("\nOriginal features:", X_train_scaled.shape[1])
-print("PCA reduced features:", X_train_pca.shape[1])
+print(f"\nPCA reduced to {X_train_pca.shape[1]} components")
 
-# Step 6: Model Selection and Training
-# Replace 'Random Forest' with 'Perceptron'
-models = {
-    'Logistic Regression': LogisticRegression(penalty='l2', max_iter=10000),
-    'Perceptron': Perceptron(max_iter=1000, random_state=42),
-    'SVM': SVC(probability=True)
+# ======================
+# Initialize Results Structure
+# ======================
+results = {
+    'models': {},
+    'ensemble': None,
+    'feature_importances': None
 }
 
-# Hyperparameter grids for each model
-param_grids = {
+# ======================
+# STEP 7: Enhanced Model Training
+# ======================
+print("\n=== STEP 7: Enhanced Model Training ===")
+
+# Define base models (ONLY adding Perceptron here)
+base_models = {
     'Logistic Regression': {
-        'model__C': [0.001, 0.01, 0.1, 1, 10]
-    },
-    'Perceptron': {
-         'model__alpha': [0.0001, 0.001, 0.01],
-         'model__penalty': ['l2', 'l1', 'elasticnet', None]
+        'obj': LogisticRegression(max_iter=10000),
+        'params': {
+            'model__C': [0.01, 0.1, 1, 10],
+            'model__class_weight': ['balanced']
+        }
     },
     'SVM': {
-        'model__C': [0.1, 1, 10],
-        'model__gamma': ['scale', 'auto']
+        'obj': SVC(probability=True),
+        'params': {
+            'model__C': [1, 10],
+            'model__gamma': ['scale', 'auto']
+        }
+    },
+    'Gradient Boosting': {
+        'obj': GradientBoostingClassifier(),
+        'params': {
+            'model__n_estimators': [100, 200],
+            'model__learning_rate': [0.05, 0.1]
+        }
+    },
+    # New Perceptron model added here
+    'Perceptron': {
+        'obj': CalibratedClassifierCV(
+            Perceptron(random_state=42, 
+                      penalty='l2', 
+                      alpha=0.1,  # High regularization
+                      max_iter=50,  # Few iterations
+                      eta0=0.001),  # Small learning rate
+            method='sigmoid'
+        ),
+        'params': {
+            # No hyperparameter tuning - fixed configuration
+            'model__cv': [2]  # Minimal calibration folds
+        }
     }
 }
 
-# Store training and validation results here
-results = {}
+# Initialize results storage
+results['models'] = {name: {} for name in base_models}
 
-# Train and tune models
-for model_name in models:
-    print(f"\n=== Training {model_name} ===")
+# Train individual models
+for name, config in base_models.items():
+    print(f"\n--- Training {name} ---")
     
-    # Create pipeline with scaling and PCA included
-    pipeline = Pipeline([
-        ('scaler', StandardScaler()),
-        ('pca', PCA(n_components=0.95)),
-        ('model', models[model_name])
-    ])
-    
-    # Grid search with cross-validation (using ROC-AUC as scoring)
-    grid_search = GridSearchCV(pipeline, param_grids[model_name], 
-                               cv=5, scoring='roc_auc', n_jobs=-1)
-    grid_search.fit(X_train_val, y_train_val)
-    
-    # Best model from grid search
-    best_model = grid_search.best_estimator_
-    
-    # Get validation predictions
-    val_pred = best_model.predict(X_val)
-    # Use predict_proba if available; otherwise, use decision_function for ROC-AUC
-    if hasattr(best_model, "predict_proba"):
-        val_proba = best_model.predict_proba(X_val)[:, 1]
-    else:
-        val_proba = best_model.decision_function(X_val)
-    
-    # Store results
-    results[model_name] = {
-        'model': best_model,
-        'val_accuracy': accuracy_score(y_val, val_pred),
-        'val_precision': precision_score(y_val, val_pred),
-        'val_recall': recall_score(y_val, val_pred),
-        'val_f1': f1_score(y_val, val_pred),
-        'val_roc_auc': roc_auc_score(y_val, val_proba),
-        'best_params': grid_search.best_params_
-    }
-    
-    print(f"Best parameters: {grid_search.best_params_}")
-    print(f"Validation ROC-AUC: {results[model_name]['val_roc_auc']:.4f}")
+    try:
+        pipeline = ImbPipeline([
+            ('smote', SMOTE(random_state=42)),
+            ('scaler', StandardScaler()),
+            ('pca', PCA(n_components=0.85)),
+            ('model', config['obj'])
+        ])
+        
+        grid = GridSearchCV(pipeline, config['params'],
+                          cv=StratifiedKFold(5),
+                          scoring='accuracy',
+                          n_jobs=-1)
+        
+        grid.fit(X_train_val, y_train_val)
+        
+        # Store results
+        results['models'][name] = {
+            'pipeline': grid.best_estimator_,
+            'best_params': grid.best_params_,
+            'best_score': grid.best_score_
+        }
+        
+    except Exception as e:
+        print(f"Error training {name}: {str(e)}")
+        results['models'][name] = None
 
-# Step 7: Final Evaluation on Test Set
-final_results = {}
+# ======================
+# STEP 7a: Ensemble Training
+# ======================
+print("\n--- Creating Ensemble ---")
 
-for model_name in results:
-    print(f"\n=== Evaluating {model_name} on Test Set ===")
-    model = results[model_name]['model']
+# Create list of successful models EXCLUDING Perceptron
+successful_models = [
+    (name, results['models'][name]['pipeline']) 
+    for name in base_models 
+    if (results['models'][name] is not None and name != 'Perceptron')  # Exclude Perceptron
+]
+
+if len(successful_models) >= 2:
+    ensemble = VotingClassifier(
+        estimators=successful_models,
+        voting='soft',
+        n_jobs=-1
+    )
     
-    # Test predictions
-    test_pred = model.predict(X_test)
+    try:
+        ensemble.fit(X_train_val, y_train_val)
+        results['ensemble'] = ensemble
+    except Exception as e:
+        print(f"Error creating ensemble: {str(e)}")
+else:
+    print("Not enough successful models for ensemble")
+
+# ========================
+# STEP 8: Enhanced Evaluation
+# ========================
+print("\n=== STEP 8: Model Evaluation ===")
+
+# Initialize metrics storage
+metrics = {}
+
+# Evaluate individual models
+for name in base_models:
+    if results['models'][name] is not None:
+        model = results['models'][name]['pipeline']
+        test_pred = model.predict(X_test)
+        
+        # Get probabilities for all models
+        test_proba = model.predict_proba(X_test)[:,1]
+        
+        metrics[name] = {
+            'accuracy': accuracy_score(y_test, test_pred),
+            'precision': precision_score(y_test, test_pred),
+            'recall': recall_score(y_test, test_pred),
+            'f1': f1_score(y_test, test_pred),
+            'roc_auc': roc_auc_score(y_test, test_proba)
+        }
+
+# Evaluate ensemble
+if results['ensemble'] is not None:
+    test_pred = results['ensemble'].predict(X_test)
+    test_proba = results['ensemble'].predict_proba(X_test)[:,1]
     
-    # Use predict_proba if available; otherwise, use decision_function for ROC-AUC
-    if hasattr(model, "predict_proba"):
-        test_score = model.predict_proba(X_test)[:, 1]
-    else:
-        test_score = model.decision_function(X_test)
-    
-    # Calculate test metrics
-    final_results[model_name] = {
+    metrics['Ensemble'] = {
         'accuracy': accuracy_score(y_test, test_pred),
         'precision': precision_score(y_test, test_pred),
         'recall': recall_score(y_test, test_pred),
         'f1': f1_score(y_test, test_pred),
-        'roc_auc': roc_auc_score(y_test, test_score)
+        'roc_auc': roc_auc_score(y_test, test_proba)
     }
-    
-    # Confusion matrix visualization
-    cm = confusion_matrix(y_test, test_pred)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title(f'{model_name} Confusion Matrix')
+
+# Display results
+print("\n=== Final Metrics ===")
+print(pd.DataFrame(metrics).T.sort_values('accuracy', ascending=False))
+
+# Modified Feature importance analysis section
+if 'Gradient Boosting' in base_models and results['models']['Gradient Boosting'] is not None:
+    try:
+        # Get the PCA-transformed feature names
+        pca = results['models']['Gradient Boosting']['pipeline'].named_steps['pca']
+        n_components = pca.n_components_
+        pca_feature_names = [f'PC{i+1}' for i in range(n_components)]
+        
+        # Get feature importances
+        gb = results['models']['Gradient Boosting']['pipeline'].named_steps['model']
+        importances = gb.feature_importances_
+        
+        # Create series with PCA component names
+        results['feature_importances'] = pd.Series(
+            importances,
+            index=pca_feature_names
+        ).sort_values(ascending=False)
+        
+        # Plot top 10 PCA component importances
+        plt.figure(figsize=(10,6))
+        results['feature_importances'].head(10).plot(kind='barh')
+        plt.title('Top 10 Important PCA Components (Gradient Boosting)')
+        plt.show()
+        
+        # Show original features contributing most to top PCA components
+        print("\nTop original features contributing to important PCA components:")
+        components = pca.components_
+        for i, pc in enumerate(results['feature_importances'].index[:3]):
+            component_idx = int(pc[2:])-1  # Extract PC number from 'PC1' etc.
+            most_important_features = X_train_val.columns[
+                np.argsort(-np.abs(components[component_idx]))[:5]
+            ]
+            print(f"{pc}: {', '.join(most_important_features)}")
+            
+    except Exception as e:
+        print(f"Error analyzing feature importances: {str(e)}")
+
+# ============================
+# STEP 9: Feature Reduction Report
+# ============================
+print("\n=== STEP 9: Feature Reduction Report ===")
+
+initial = len(pd.read_csv('data.csv').columns) - 1  # Exclude ID
+final = X_train_pca.shape[1]
+
+print(f"""
+Feature Reduction Summary:
+- Initial features: {initial}
+- After correlation filtering: {X_train.shape[1]}
+- After PCA: {final}
+- Total reduction: {initial - final} features
+- Retention rate: {final/initial:.1%}""")
+
+# ============================
+# STEP 10: Model Interpretation
+# ============================
+print("\n=== STEP 10: Model Interpretation ===")
+
+# Logistic Regression coefficients
+if 'Logistic Regression' in results['models'] and results['models']['Logistic Regression'] is not None:
+    lr_pipeline = results['models']['Logistic Regression']['pipeline']
+    lr_model = lr_pipeline.named_steps['model']
+    coefs = pd.Series(lr_model.coef_[0], 
+                    index=[f'PC{i+1}' for i in range(len(lr_model.coef_[0]))])
+    plt.figure(figsize=(10,6))
+    coefs.sort_values().plot(kind='barh')
+    plt.title('Logistic Regression Coefficients')
     plt.show()
 
-# Step 8: Results Comparison
-results_df = pd.DataFrame(final_results).T
-print("\n=== Final Test Results ===")
-print(results_df)
-
-# Step 9: Feature Importance Analysis for models that support it
-# Note: Perceptron does not have a built-in feature importance method.
-# For tree-based models, you might use feature_importances_ but here we show for example purposes.
-if 'Perceptron' in models:
-    # Extract the underlying Perceptron model from the pipeline
-    # (In this simple linear model, feature coefficients could act as a proxy for feature importance)
-    model = results['Perceptron']['model'].named_steps['model']
-    # Note: The coefficients correspond to the PCA components, not the original features.
-    try:
-        importances = model.coef_[0]
-        pca_components = [f'PC{i+1}' for i in range(len(importances))]
-        importance_df = pd.DataFrame({
-            'PCA Component': pca_components,
-            'Coefficient': importances
-        }).sort_values('Coefficient', key=lambda col: abs(col), ascending=False)
-        
-        plt.figure(figsize=(10, 6))
-        sns.barplot(x='Coefficient', y='PCA Component', data=importance_df.head(10))
-        plt.title('Top 10 PCA Component Coefficients (Perceptron)')
-        plt.show()
-    except Exception as e:
-        print("Feature importance could not be computed:", e)
+# Model performance comparison
+metrics_df = pd.DataFrame(metrics).T.sort_values('accuracy', ascending=False)
+plt.figure(figsize=(10,6))
+metrics_df[['accuracy', 'precision', 'recall', 'f1']].plot(kind='bar', rot=0)
+plt.title('Model Performance Comparison')
+plt.ylabel('Score')
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.show()
