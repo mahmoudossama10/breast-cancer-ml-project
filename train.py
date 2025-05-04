@@ -24,49 +24,72 @@ from sklearn.model_selection import StratifiedKFold
 import math
 from sklearn.base import clone
 from sklearn.utils import resample
+import requests
+from io import StringIO
 
 # Set random seed for reproducibility
 np.random.seed(42)
 
 def load_data(file_path):
-    """Load the dataset from a CSV file."""
+    # Load the dataset from a CSV file or URL.
     print("=== STEP 1: Data Loading ===")
-    # For demonstration, create synthetic data similar to breast cancer dataset
-    # In a real scenario, you would use: df = pd.read_csv(file_path)
     
-    from sklearn.datasets import load_breast_cancer
-    data = load_breast_cancer()
-    df = pd.DataFrame(data.data, columns=data.feature_names)
-    df['diagnosis'] = data.target
-    df['id'] = np.arange(len(df))
+    # Check if file_path is a URL
+    if file_path.startswith('http'):
+        # Fetch data from URL
+        response = requests.get(file_path)
+        if response.status_code == 200:
+            data_content = StringIO(response.text)
+            df = pd.read_csv(data_content)
+            print("Successfully loaded data from URL")
+        else:
+            raise Exception(f"Failed to fetch data from URL: {response.status_code}")
+    else:
+        # Load from local file
+        df = pd.read_csv(file_path)
     
     print(f"Initial dataset shape: {df.shape}")
     print("Columns:", df.columns.tolist())
 
-    # Class distribution plot
-    plt.figure(figsize=(8, 6))
-    sns.countplot(x='diagnosis', data=df)
-    plt.title('Initial Class Distribution (M=0, B=1)')
+   # Calculate the count of each class
+    class_counts = df['diagnosis'].value_counts()
+
+    # Plot the pie chart
+    plt.figure(figsize=(8, 8))
+    plt.pie(class_counts, labels=class_counts.index, autopct='%1.1f%%', startangle=90)
+    plt.title('Initial Class Distribution (M=Malignant, B=Benign)')
     plt.show()
     return df
 
 
 def clean_data(df):
-    """Perform initial cleaning such as handling duplicates and converting target"""
+    # Perform initial cleaning such as handling duplicates and converting target
     print("\n=== STEP 2: Data Cleaning ===")
     
     # Drop ID column
     df = df.drop(columns=['id'])
     print(f"Dropped 'id' column. New shape: {df.shape}")
 
-    # Target variable is already binary (0=malignant, 1=benign)
+    # Convert diagnosis to binary
+    # Concept: Preparing data for binary classification
+    df['diagnosis'] = df['diagnosis'].map({'M': 1, 'B': 0})
     print("\nTarget variable distribution:")
     print(df['diagnosis'].value_counts())
 
-    # Handle missing values
+    # Convert all columns to numeric (some might be loaded as strings)
     # Concept: Handling deterministic vs. stochastic noise
+    for col in df.columns:
+        if col != 'diagnosis':  # Skip the target variable
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except Exception as e:
+                print(f"Error converting column {col} to numeric: {e}")
+                # If conversion fails, keep as is
+
+    # Handle missing values
     imputer = SimpleImputer(strategy='mean')  # Mean imputation for stochastic noise
-    df[df.columns] = imputer.fit_transform(df)
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
     print("Imputed missing values")
 
     # Check for duplicates
@@ -80,7 +103,7 @@ def clean_data(df):
 
 
 def feature_selection(df):
-    """Remove highly correlated features and perform SelectKBest feature selection."""
+    # Remove highly correlated features and perform SelectKBest feature selection.
     print("\n=== STEP 3: Correlation-based Feature Filtering ===")
     threshold = 0.95
 
@@ -144,7 +167,7 @@ def feature_selection(df):
     y = df_filtered['diagnosis']
     
     # Using SelectKBest with f_classif (ANOVA F-value)
-    selector = SelectKBest(score_func=f_classif, k=20)
+    selector = SelectKBest(score_func=f_classif, k=min(20, X.shape[1]))  # Ensure k is not larger than number of features
     X_selected = selector.fit_transform(X, y)
     
     # Get selected feature names
@@ -163,8 +186,8 @@ def feature_selection(df):
                 pair = (post_corr.columns[i], post_corr.columns[j], post_corr.iloc[i, j])
                 remaining_pairs.append(pair)
 
-    plt.figure(figsize=(10, 6))
     if remaining_pairs:
+        plt.figure(figsize=(10, 6))
         labels = [f"{pair[0]} - {pair[1]}" for pair in remaining_pairs]
         values = [pair[2] for pair in remaining_pairs]
         
@@ -184,7 +207,7 @@ def feature_selection(df):
 
 
 def visualize_data(df_filtered):
-    """Visualize filtered feature distributions."""
+    # Visualize filtered feature distributions.
     print("\n=== STEP 4: Data Visualization ===")
 
     plt.figure(figsize=(12, 6))
@@ -201,7 +224,7 @@ def visualize_data(df_filtered):
 
 
 def split_data(df_filtered):
-    """Split data into training, validation, and test sets."""
+    # Split data into training, validation, and test sets.
     print("\n=== STEP 5: Data Splitting ===")
 
     X = df_filtered.drop(columns=['diagnosis'])
@@ -219,7 +242,7 @@ def split_data(df_filtered):
 
 
 def preprocess_data(X_train, X_val, X_test):
-    """Apply Standardization and PCA."""
+    # Apply Standardization and PCA.
     print("\n=== STEP 6: Preprocessing ===")
 
     # Concept: Feature scaling for gradient-based methods
@@ -229,7 +252,9 @@ def preprocess_data(X_train, X_val, X_test):
     X_test_scaled = scaler.transform(X_test)
 
     # Concept: Dimensionality reduction to reduce model complexity
-    pca = PCA(n_components=0.80)
+    # Use a smaller number of components if dataset is small
+    n_components = max(0.80, 0.95)  # Use 80% variance or 95% if dataset is small
+    pca = PCA(n_components=n_components)
     X_train_pca = pca.fit_transform(X_train_scaled)
     X_val_pca = pca.transform(X_val_scaled)
     X_test_pca = pca.transform(X_test_scaled)
@@ -248,48 +273,44 @@ def preprocess_data(X_train, X_val, X_test):
     return X_train_pca, X_val_pca, X_test_pca
 
 
-def hoeffding_bound(epsilon, n, delta=0.05):
-    """
-    Calculate Hoeffding's bound for generalization error.
+def hoeffding_bound(epsilmon, n, delta=0.05):
+    # Calculate Hoeffding's bound for generalization error.
     
-    Concept: Hoeffding's Inequality - Provides a bound on the probability that 
-    the empirical mean deviates from the true mean by more than epsilon.
+    # Concept: Hoeffding's Inequality - Provides a bound on the probability that 
+    # the empirical mean deviates from the true mean by more than epsilon.
     
-    Parameters:
-    epsilon: Deviation from true mean
-    n: Sample size
-    delta: Confidence parameter (default 0.05 for 95% confidence)
+    # Parameters:
+    # epsilon: Deviation from true mean
+    # n: Sample size
+    # delta: Confidence parameter (default 0.05 for 95% confidence)
     
-    Returns:
-    The bound value
-    """
+    # Returns:
+    # The bound value
     return math.sqrt(math.log(2/delta) / (2 * n))
 
 
 def vc_bound(n, h, delta=0.05):
-    """
-    Calculate VC generalization bound.
+    # Calculate VC generalization bound.
     
-    Concept: VC Generalization Bound - Relates the generalization error to the 
-    VC dimension (h) of the hypothesis class and the sample size.
+    # Concept: VC Generalization Bound - Relates the generalization error to the 
+    # VC dimension (h) of the hypothesis class and the sample size.
     
-    Parameters:
-    n: Sample size
-    h: VC dimension
-    delta: Confidence parameter
+    # Parameters:
+    # n: Sample size
+    # h: VC dimension
+    # delta: Confidence parameter
     
-    Returns:
-    The bound value
-    """
+    # Returns:
+    # The bound value
     return math.sqrt((h * (math.log(2*n/h) + 1) + math.log(1/delta)) / n)
 
 
 def analyze_generalization_bounds(X_train, y_train):
-    """
-    Analyze generalization bounds for different models.
+
+    # Analyze generalization bounds for different models.
     
-    Concept: Generalization Bounds - Theoretical guarantees on model performance
-    """
+    # Concept: Generalization Bounds - Theoretical guarantees on model performance
+
     print("\n=== STEP 7: Generalization Bounds Analysis ===")
     
     n = len(X_train)
@@ -327,7 +348,7 @@ def analyze_generalization_bounds(X_train, y_train):
 
 
 def train_individual_models(X_train_val, y_train_val):
-    """Train individual models with hyperparameter tuning."""
+    # Train individual models with hyperparameter tuning.
     print("\n=== STEP 8: Enhanced Model Training ===")
 
     base_models = {
@@ -374,7 +395,7 @@ def train_individual_models(X_train_val, y_train_val):
         },
         'SGD Classifier': {
             # Concept: Stochastic Gradient Descent
-            'obj': SGDClassifier(loss='log_loss', random_state=42, eta0=0.01),  # Always set eta0 > 0
+            'obj': SGDClassifier(loss='log_loss', random_state=42, eta0=0.01),  # Fixed eta0 > 0
             'params': {
                 'model__alpha': [0.0001, 0.001, 0.01],  # Regularization strength
                 'model__penalty': ['l1', 'l2', 'elasticnet'],  # Different regularization types
@@ -489,7 +510,7 @@ def train_individual_models(X_train_val, y_train_val):
 
 
 def train_ensemble(results, X_train_val, y_train_val):
-    """Create ensemble model from successful models."""
+    # Create ensemble model from successful models.
     print("\n--- Creating Ensemble ---")
 
     # Create list of successful models EXCLUDING Perceptron
@@ -529,7 +550,7 @@ def train_ensemble(results, X_train_val, y_train_val):
 
 
 def evaluate_models(results, X_test, y_test):
-    """Evaluate models and display metrics."""
+    # Evaluate models and display metrics.
     print("\n=== STEP 9: Model Evaluation ===")
 
     metrics = {}
@@ -591,7 +612,7 @@ def evaluate_models(results, X_test, y_test):
 
 
 def analyze_feature_importance(results, X_train_val):
-    """Analyze feature importance in PCA components."""
+    # Analyze feature importance in PCA components.
     print("\n=== STEP 10: Feature Importance Analysis ===")
     
     # Modified Feature importance analysis section
@@ -663,7 +684,7 @@ def analyze_feature_importance(results, X_train_val):
 
 
 def feature_reduction_report(df, X_train_pca):
-    """Generate feature reduction report."""
+    # Generate feature reduction report.
     print("\n=== STEP 11: Feature Reduction Report ===")
 
     initial = len(df.columns) - 1  # Exclude ID
@@ -679,7 +700,7 @@ def feature_reduction_report(df, X_train_pca):
 
 
 def interpret_logistic_regression(results):
-    """Interpret Logistic Regression coefficients."""
+    # Interpret Logistic Regression coefficients.
     print("\n=== STEP 12: Model Interpretation ===")
 
     if 'Logistic Regression' in results['models'] and results['models']['Logistic Regression'] is not None:
@@ -706,7 +727,7 @@ def interpret_logistic_regression(results):
 
 
 def performance_comparison(metrics_df):
-    """Compare model performances using a bar plot."""
+    # Compare model performances using a bar plot.
     metrics_df_sorted = metrics_df[['accuracy', 'precision', 'recall', 'f1']].sort_values('accuracy', ascending=False)
 
     plt.figure(figsize=(10, 6))
@@ -719,11 +740,11 @@ def performance_comparison(metrics_df):
 
 
 def cross_validation_analysis(results, X_train_val, y_train_val):
-    """
-    Perform cross-validation analysis on the best models.
+
+    # Perform cross-validation analysis on the best models.
     
-    Concept: K-fold Cross Validation - Evaluating model performance
-    """
+    # Concept: K-fold Cross Validation - Evaluating model performance
+
     print("\n=== STEP 13: Cross-Validation Analysis ===")
     
     # Select top 3 models based on previous results
@@ -789,11 +810,11 @@ def cross_validation_analysis(results, X_train_val, y_train_val):
 
 
 def bias_variance_analysis(results, X_train, y_train, X_test, y_test):
-    """
-    Analyze bias-variance tradeoff for different models.
+
+    # Analyze bias-variance tradeoff for different models.
     
-    Concept: Bias-Variance Tradeoff - Understanding model complexity
-    """
+    # Concept: Bias-Variance Tradeoff - Understanding model complexity
+
     print("\n=== STEP 14: Bias-Variance Analysis ===")
     
     # Select a few representative models
@@ -896,8 +917,8 @@ def bias_variance_analysis(results, X_train, y_train, X_test, y_test):
 
 
 def main():
-    # Load data
-    df = load_data('data.csv')
+    # Load data from the provided URL
+    df = load_data('https://hebbkx1anhila5yf.public.blob.vercel-storage.com/data-rZr5Sn6P3FxXvOU6ZNLh49pmihOL4O.csv')
     
     # Clean data
     df_clean = clean_data(df)
